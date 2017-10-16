@@ -4,7 +4,7 @@ produce.two.dimensional.noise.local <-
             ,max.level = 1              # 0: global noise, >0: various degrees of localization
             ,win.type  = 'flat.hanning' # 'hanning' or 'flat.hanning'
             ,war.thr   = .1             
-            ,overlap   = 10
+            ,overlap   = 40
             ,do.set.seed = FALSE
 			,on.screen = FALSE
 			) {
@@ -30,7 +30,11 @@ produce.two.dimensional.noise.local <-
     orig.dim.y = dim(z)[2]
     orig.dm.size = c(orig.dim.x,orig.dim.y)
     
-    # buffer the field with zeros to obtain a squared domain
+    # apply window to the image to limit spurious edge effects
+    orig.window=build.two.dimensional.window(wsize=orig.dm.size,wtype=win.type)
+    z = z*orig.window
+    
+    # now buffer the field with zeros to get a squared domain       <-- need this at the moment for the nested approach, but I guess we could try to avoid it
     dim.x = max(orig.dm.size) 
     dim.y = dim.x
     dm.size = c(dim.x,dim.y)
@@ -60,8 +64,7 @@ produce.two.dimensional.noise.local <-
     freq.grid = sqrt(fx^2 + fy^2)
     
     # get global fourier filter
-    this.window=build.two.dimensional.window(wsize=dm.size,wtype=win.type)
-    mfilter0 = get.fourier.filter(z*this.window)
+    mfilter0 = get.fourier.filter(z)
     # and allocate it to the final grid
     mfilter = array(0, dim=c(2^max.level,2^max.level,dim(mfilter0)[1],dim(mfilter0)[2]))
     mfilter = sweep(mfilter,c(3,4),mfilter0,'+')
@@ -86,7 +89,7 @@ produce.two.dimensional.noise.local <-
             for(n in 1:dim(Idxinext)[1]){
                 # print(c(n,Idxinext[n,],Idxjnext[n,]))
 
-                mask = get.mask(dm.size[1],Idxinext[n,],Idxjnext[n,])
+                mask = get.mask(dm.size[1],Idxinext[n,],Idxjnext[n,],win.type)
                 war = sum((z*mask)>0)/(Idxinext[n,2]-Idxinext[n,1]+1)^2 
                 if(war>war.thr){
                     # the new filter 
@@ -94,7 +97,7 @@ produce.two.dimensional.noise.local <-
                     
                     # compute logistic function to define weights as function of frequency
                     # k controls the shape of the weighting function
-                    merge.weights = logistic.function(1/freq.grid, k=0.01, x0 = (Idxinext[n,2] - Idxinext[n,1] + 1)/2)
+                    merge.weights = logistic.function(1/freq.grid, k=0.05, x0 = (Idxinext[n,2] - Idxinext[n,1] + 1)/2)
                     newfilter = newfilter*(1-merge.weights)
                     
                     # perform the weighted average of previous and new fourier filters
@@ -132,10 +135,14 @@ produce.two.dimensional.noise.local <-
     sum.of.masks = array(0,dim=c(dim.x,dim.y,nr.frames))
     idxi = array(0,dim=c(2,1))
     idxj = array(0,dim=c(2,1))
-    winsize = ceiling( ( dm.size[1] + (2^max.level-1)*overlap ) / 2^max.level )
+    winsize = round( dm.size[1] / 2^max.level )
     
     # loop frames
 	for(m in 1:nr.frames) {
+        
+        # get fourier spectrum of white noise field
+        z.ftp = fft(white.noise[,,m])
+        
         # loop rows
         for(i in 0:(2^max.level-1)){
             # loop columns
@@ -143,19 +150,18 @@ produce.two.dimensional.noise.local <-
             
             # apply fourier filtering with local filter
             this.filter = mfilter[i+1,j+1,,]
-            z.ftp = fft(white.noise[,,m])
             z.ftp.fl = z.ftp * this.filter
             z.iftp = fft(z.ftp.fl ,inverse=T)
             z.cor = Re(z.iftp)
             
             # compute indices of local area
-            idxi[1] = i*winsize - i*overlap + 1
-            idxi[2] = min( c(idxi[1] + winsize - 1, dm.size[1]) )
-            idxj[1] = j*winsize - j*overlap + 1
-            idxj[2] = min( c(idxj[1] + winsize - 1, dm.size[2]) )
+            idxi[1] = max( c(round(i*winsize - overlap/2 + 1), 1) )
+            idxi[2] = min( c(round(idxi[1] + winsize + overlap/2 - 1), dm.size[1]) )
+            idxj[1] = max( c(round(j*winsize - overlap/2 + 1), 1) )
+            idxj[2] = min( c(round(idxj[1] + winsize + overlap/2 - 1), dm.size[2]) )
             
             # build mask and add local noise field to the composite image
-            mask = get.mask(dm.size[1],idxi,idxj)
+            mask = get.mask(dm.size[1],idxi,idxj,win.type)
             corr.noise[,,m] = corr.noise[,,m] + z.cor*mask
             sum.of.masks[,,m] = sum.of.masks[,,m] + mask
             }
@@ -190,17 +196,12 @@ build.two.dimensional.window <-
     function( wsize, wtype = 'flat.hanning'
             ) {
              
-    two.dimensional.window <- tryCatch(
-        {
+    two.dimensional.window <- tryCatch({
         # Asymmetric window
-        
         # dim 1
         switch(wtype,
-        
             hanning={
-                w1d1 = 0.5 - 0.5*cos(2*pi*seq(wsize[1])/(wsize[1] - 1))
-            },
-            
+                w1d1 = 0.5 - 0.5*cos(2*pi*seq(wsize[1])/(wsize[1] - 1))},
             flat.hanning={
                 T = wsize[1]/4
                 W = wsize[1]/2
@@ -209,19 +210,13 @@ build.two.dimensional.window <-
                 R[R<0]=0.
                 A = 0.5*(1.0 + cos(pi*R/T))
                 A[abs(B)>(2*T)]=0.0
-                w1d1 = A
-            },
-            
+                w1d1 = A},
             stop('Unknown window type.')
-        )
-        
+        ) 
         # dim 2
         switch(wtype,
-        
             hanning={
-                w1d2 = 0.5 - 0.5*cos(2*pi*seq(wsize[2])/(wsize[2] - 1))
-            },
-            
+                w1d2 = 0.5 - 0.5*cos(2*pi*seq(wsize[2])/(wsize[2] - 1))},
             flat.hanning={
                 T = wsize[2]/4
                 W = wsize[2]/2
@@ -230,25 +225,18 @@ build.two.dimensional.window <-
                 R[R<0]=0.
                 A = 0.5*(1.0 + cos(pi*R/T))
                 A[abs(B)>(2*T)]=0.0
-                w1d2 = A
-            },
-            
+                w1d2 = A},
             stop('Unknown window type.')
         )
         
         # 2d window
         two.dimensional.window = sqrt(outer(w1d1,w1d2))
-        
         },
-        error=function(cond) {
-        
+        error=function(cond){
         # Symmetric window
         switch(wtype,
-        
             hanning={
-                w1d = 0.5 - 0.5*cos(2*pi*seq(wsize[1])/(wsize[1] - 1))
-            },
-            
+                w1d = 0.5 - 0.5*cos(2*pi*seq(wsize[1])/(wsize[1] - 1))},
             flat.hanning={
                 T = wsize[1]/4
                 W = wsize[1]/2
@@ -257,9 +245,7 @@ build.two.dimensional.window <-
                 R[R<0]=0.
                 A = 0.5*(1.0 + cos(pi*R/T))
                 A[abs(B)>(2*T)]=0.0
-                w1d = A
-            },
-            
+                w1d = A},
             stop('Unknown window type.')
         )
         # 2d window
@@ -325,9 +311,9 @@ split.field <-
 }
 
 get.mask <-
-    function(Size,idxi,idxj){
+    function(Size,idxi,idxj,wintype){
     winsize = c(idxi[2] - idxi[1] + 1, idxj[2] - idxj[1] + 1)
-    wind = build.two.dimensional.window(winsize)
+    wind = build.two.dimensional.window(wsize = winsize, wtype = wintype)
     mask = array(0,dim=c(Size,Size)) 
     mask[idxi[1]:idxi[2],idxj[1]:idxj[2]] = wind
     return(mask)
